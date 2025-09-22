@@ -1,0 +1,10 @@
+load chimera-n5.maude
+search [,26] init5 =>* < O1:Oid : leader | AS1:AttributeSet > < O2:Oid : leader | AS2:AttributeSet > C:Config .
+search [,26] init5 =>! < checker : checker | comInd: 51, majN: 2 >
+  < OID:Oid : leader | maxCommittedLogIndex: 50, AS:AttributeSet >
+  C:Config . 
+search [,26] init5 =>! <recof>
+  C:Config . 
+search [,26] init5 =>! < checker : checker | comInd: empty, majN: 2 >
+  C:Config . 
+q

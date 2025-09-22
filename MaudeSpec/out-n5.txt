@@ -1,0 +1,37 @@
+		     \||||||||||||||||||/
+		   --- Welcome to Maude ---
+		     /||||||||||||||||||\
+	    Maude 3.3.1 built: Apr 13 2023 16:10:31
+	     Copyright 1997-2023 SRI International
+		   Thu Sep 18 12:48:19 2025
+==========================================
+search [, 26] in CHIMERA-CHECK : init5 =>* C
+< O1:Oid : leader | AS1:AttributeSet >
+< O2:Oid : leader | AS2:AttributeSet > .
+
+No solution.
+states: 2200414  rewrites: 168344551 in 4208586ms cpu (4208651ms real) (40000
+    rewrites/second)
+==========================================
+search [, 26] in CHIMERA-CHECK : init5 =>! C
+< checker : checker | comInd: 51, majN: 2 >
+< OID : leader | AS, maxCommittedLogIndex: 50 > .
+
+No solution.
+states: 2652353  rewrites: 194138948 in 9813576ms cpu (9813679ms real) (19782
+    rewrites/second)
+==========================================
+search [, 26] in CHIMERA-CHECK : init5 =>! <recof>
+C .
+
+No solution.
+states: 2652353  rewrites: 194138948 in 10213415ms cpu (10213458ms real) (19008
+    rewrites/second)
+==========================================
+search [, 26] in CHIMERA-CHECK : init5 =>! C
+< checker : checker | comInd: empty, majN: 2 > .
+
+No solution.
+states: 2652353  rewrites: 194138948 in 10468553ms cpu (10468599ms real) (18544
+    rewrites/second)
+Bye.

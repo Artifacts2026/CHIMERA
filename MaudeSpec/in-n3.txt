@@ -1,0 +1,6 @@
+load chimera-n3.maude
+red modelCheck(init3, [] ~ doubleLeader) .
+red modelCheck(init3, [] (comProp(51) -> [] <> marProp(51))) .
+red modelCheck(init3, [](recofProp -> [] <> normalProp)) .
+red modelCheck(init3, [] <> comProp(51)) .
+q

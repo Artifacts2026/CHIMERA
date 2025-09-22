@@ -1,0 +1,914 @@
+
+mod CONFIG is
+  pr BOOL . 
+
+  sorts Attribute AttributeSet .
+  subsort Attribute < AttributeSet .
+  op none : -> AttributeSet [ctor] .
+  op _,_ : AttributeSet AttributeSet -> AttributeSet
+          [format (o b so o) ctor assoc comm id: none] .
+  
+  sorts Oid Cid Object Msg MsgCont Config .
+  subsort Object Msg < Config .
+  op <_:_|_> : Oid Cid AttributeSet -> Object
+          [ctor object format (b r b g b o b o)] .
+  
+  sort OidList .
+  subsort Oid < OidList .
+  op nil : -> OidList [ctor] .
+  op _::_ : OidList OidList -> OidList [ctor assoc id: nil] .
+  op _in_ : Oid OidList -> Bool .
+  vars O O' : Oid . var OL : OidList .
+  eq O in (O :: OL) = true .
+  eq O in (nil) = false .
+  ceq O in (O' :: OL) = O in OL if O =/= O' .
+
+  op _from_to_ : MsgCont Oid Oid -> Msg 
+      [format (o m o m o o) ctor] .
+  op multicast_from_to_ : MsgCont Oid OidList -> Config 
+      [format (m o m o m o o) ctor] .
+  var MC : MsgCont .
+  eq multicast MC from O to (O' :: OL)
+    = (MC from O to O') multicast MC from O to OL .
+  eq multicast MC from O to nil = none .
+
+  op none : -> Config [ctor] .
+  op __ : Config Config -> Config
+      [format (o n o) ctor config assoc comm id: none] .
+
+endm
+
+mod CHIMERA is
+
+  inc CONFIG .
+  pr NAT .
+  
+  --- Obj
+  ops follower leader candidate : -> Cid .
+  ops node(_) : Nat -> Oid .
+
+  op curLeader:_ : Oid -> Attribute [ctor] .
+  op curTerm:_ : Nat -> Attribute [ctor] .
+  --- all other node name
+  op allOther:_ : OidList -> Attribute [ctor] .
+  --- maxRecvIndex
+  op curIndex:_ : Nat -> Attribute [ctor] .
+  --- the max committed log index
+  op maxCommittedLogIndex:_ : Nat -> Attribute [ctor] .
+
+  sorts Log Logs .
+  --- term~node as a ballot, or term~index as a log block
+  op [_~_] : Nat Nat -> Log [ctor] .
+  --- term~index~ack number as a log block for leader
+  op [_~_~_] : Nat Nat Nat -> Log [ctor] .
+  subsort Log < Logs .
+  op empty : -> Logs .
+  op _::_ : Logs Logs -> Logs [ctor assoc id: empty] .
+  op log-3to2_ : Logs -> Logs .
+  eq log-3to2([N1 ~ N2 ~ N3] :: L) =
+      [N1 ~ N2] :: log-3to2(L) .
+  eq log-3to2([N1 ~ N2] :: L) =
+      [N1 ~ N2] :: log-3to2(L) .
+  eq log-3to2(empty) = empty .
+
+  op log:_ : Logs -> Attribute [ctor] .
+  --- record the history of ballot
+  op ballotHistory:_ : Logs -> Attribute [ctor] .
+  --- used in campaign, count the approve ballot
+  op campaignCount:_ : Logs -> Attribute [ctor] .
+
+  --- counter and disk
+  ops cnt disk : -> Cid .
+  op node(_)-cnt  : Nat -> Oid .
+  op node(_)-disk : Nat -> Oid . 
+  op cnt:_ : Nat -> Attribute [ctor] .
+  op disk:_ : Logs -> Attribute [ctor] .
+  --- disk log format: [curTerm~votedFor~counter]
+
+  --- 5 assist model checker
+  op checker : -> Oid .
+  op checker : -> Cid .
+  sort NatSet .
+  subsort Nat < NatSet .
+  op empty : -> NatSet .
+  op _,_ : NatSet NatSet -> NatSet [ctor assoc comm id: empty] .
+  op _in_ : Nat NatSet -> Bool .
+  eq N in (NS, N, NS') = true .
+  eq N in NS = false [owise] .
+  op comInd:_ : NatSet -> Attribute .
+  op majN:_ : Nat -> Attribute .
+
+  --- Message
+  --- msg for election
+  --- tell a follower to become candidate
+  op elect-trigger : -> MsgCont .
+  --- candidate ask for ballot
+  op elect_ : Log -> MsgCont .
+  --- others approve of candidate
+  op elect-approve_ : Log -> MsgCont .
+
+  --- msg for log replica
+  --- leader append log to follower, in pipe
+  op log-append_ : Logs -> MsgCont .
+  --- follower accept the log
+  op log-ack_ : Log -> MsgCont .
+  --- leader commit the log, in pipe
+  op log-commit_ : Log -> MsgCont .
+
+  --- msg for cnt and disk
+  --- update cnt, [curTerm~votedFor]
+  op update-cnt_ : Log -> MsgCont .
+  --- reply update cnt, [curTerm~votedFor~cnt]
+  op reply-cnt_ : Log -> MsgCont .
+  --- write to disk, [curTerm~votedFor~cnt]
+  op write-disk_ : Log -> MsgCont .
+  --- disk write ack, [curTerm~votedFor]
+  op write-disk-ack_ : Log -> MsgCont .
+
+  --- flag
+  ops <normal> <recof> <cand> : -> Config [format (r r)] .
+
+  --- Rule
+  vars N N' N'' N1 N2 N3 N4 N5 TERM TERM' TERM'' LI LI' : Nat .
+  vars CID CID' : Cid . vars OID OID' : Oid . var MC : MsgCont .
+  vars AS AS' : AttributeSet . vars OL OL' : OidList .
+  vars L L' L'' L''' : Logs . vars LOG : Log . vars C C' : Config .
+  vars NS NS' : NatSet .
+  
+  --- 1 Leader election
+  --- 1.1 trigger a election, update cnt, wait for disk ack
+  crl [elect-start] :
+  (elect-trigger from node(N) to node(N) )
+  < node(N)-pipe : pipe | pipeMsg: nil >
+  < node(N) : follower | allOther: OL, 
+    curTerm: N', ballotHistory: L, AS >
+  <normal>
+  =>
+  <normal>
+  < node(N)-pipe : pipe | pipeMsg: nil >
+  < node(N) : candidate | allOther: OL, 
+    curTerm: (N' + 1), ballotHistory: ([(N' + 1) ~ N] :: L), 
+    campaignCount: empty, AS >
+  --- (multicast elect[(N' + 1) ~ N] from node(N) to OL)
+  (update-cnt[(N' + 1) ~ N] from node(N) to node(N)-cnt) 
+  if N <= 2 .
+
+  --- 1.1.2 disk ack, multicast for vote
+  rl [elect-start-ack] :
+  < node(N) : candidate | allOther: OL, curIndex: N2, AS >
+  (write-disk-ack[TERM ~ N] from node(N)-disk to node(N))
+    <normal>
+  =>
+    <normal>
+  < node(N) : candidate | allOther: OL, curIndex: N2, AS >
+  (multicast elect[TERM ~ N ~ N2] from node(N) to OL) .
+
+  --- 1.2 approve the vote, cnt, wait for disk ack
+  crl [elect-vote-approve] :
+  (elect[TERM ~ N ~ N2] from node(N) to node(N'))
+  < node(N') : CID | curTerm: TERM', curLeader: OID,
+    ballotHistory: ([TERM'' ~ N''] :: L), AS >
+    <normal>
+  =>
+    <normal>
+  < node(N') : follower | curTerm: TERM, curLeader: node(N),
+    ballotHistory: ([TERM ~ N] :: [TERM'' ~ N''] :: L), AS >
+  --- (elect-approve[TERM ~ N'] from node(N') to node(N))
+  (update-cnt[TERM ~ N] from node(N') to node(N')-cnt)
+  if TERM > TERM' or (TERM == TERM' and TERM > TERM'') .
+
+  --- 1.2.2 approve the vote, cnt disk ack
+  rl [elect-vote-approve-ack] :
+  (write-disk-ack[TERM ~ N] from node(N')-disk to node(N'))
+  < node(N') : follower | AS >
+    <normal>
+  =>
+    <normal>
+  < node(N') : follower | AS >
+  (elect-approve[TERM ~ N'] from node(N') to node(N)) .
+
+  --- 1.3 not approve, negelect
+  ceq  
+  (elect[TERM ~ N ~ N2] from node(N) to node(N'))
+  < node(N') : follower | curTerm: TERM', 
+    ballotHistory: ([TERM'' ~ N''] :: L), AS >
+  =
+  < node(N') : follower | curTerm: TERM', 
+    ballotHistory: ([TERM'' ~ N''] :: L), AS >
+  if TERM < TERM' or (TERM == TERM' and TERM <= TERM'') .
+  --- crl [elect-negelect] :
+  --- (elect[TERM ~ N] from node(N) to node(N'))
+  --- < node(N') : follower | curTerm: TERM', AS >
+  --- =>
+  --- < node(N') : follower | curTerm: TERM', AS >
+  --- if TERM <= TERM' .
+
+  op len : OidList -> Nat .
+  eq len(nil) = 0 .
+  eq len(OID :: OL) = 1 + len(OL) .
+
+  op len : Logs -> Nat .
+  eq len(empty) = 0 .
+  eq len(LOG :: L) = 1 + len(L) .
+
+  --- 1.4 candidate recv approve
+  crl [elect-recv-approve] :
+  (elect-approve[TERM ~ N'] from node(N') to node(N))
+  < node(N) : candidate | curTerm: TERM,
+    campaignCount: L, allOther: OL, AS >
+    <normal>
+  =>
+    <normal>
+  < node(N) : candidate | curTerm: TERM,
+    campaignCount: ([TERM ~ N'] :: L), allOther: OL, AS > 
+  if len(L) + 1 < len(OL) quo 2 .
+
+  --- 1.5 candidate success, send append log
+  crl [elect-success] :
+  (elect-approve[TERM ~ N'] from node(N') to node(N))
+  < node(N) : candidate | curTerm: TERM, curLeader: OID,
+    allOther: OL, campaignCount: L',
+    log: L,
+    curIndex: LI, AS >
+    <normal>
+  =>
+    <normal>
+  < node(N) : leader | curTerm: TERM, curLeader: node(N),
+    allOther: OL, 
+    --- logCache: [TERM ~ (LI + 1)] ,
+    log: ([TERM ~ (LI + 1) ~ 0] :: L),
+    curIndex: (LI + 1), AS > 
+  multicast log-append(log-3to2(([TERM ~ (LI + 1)] :: L))) from node(N) to OL
+  if len(L) + 1 >= len(OL) quo 2 .
+
+  --- 1.6 recycle remained vote
+  eq 
+  (elect-approve[TERM ~ N'] from node(N') to node(N))
+  < node(N) : leader | curTerm: TERM, AS >
+  =
+  < node(N) : leader | curTerm: TERM, AS > .
+  ceq 
+  (elect-approve[TERM' ~ N'] from node(N') to node(N))
+  < node(N2) : leader | curTerm: TERM, AS >
+  =
+  < node(N2) : leader | curTerm: TERM, AS >  if TERM > TERM' .
+ 
+  --- 2 log replica
+  --- build the pipe for each node
+  op pipe : -> Cid .
+  op node(_)-pipe : Nat -> Oid .
+  sort MsgList .
+  op nil : -> MsgList [ctor] .
+  subsort Msg < MsgList .
+  op _::_ : MsgList MsgList -> MsgList [ctor assoc id: nil] .
+  op pipeMsg:_ : MsgList -> Attribute .
+  vars ML ML' : MsgList .
+
+  --- loading pipe
+  eq(
+    (log-append L from node(N) to node(N'))
+    < node(N')-pipe : pipe | pipeMsg: ML >
+  ) =
+  < node(N')-pipe : pipe | 
+    pipeMsg: ((log-append L from node(N) to node(N')) :: ML) > .
+
+  eq(
+    (log-commit L from node(N) to node(N'))
+    < node(N')-pipe : pipe | pipeMsg: ML >
+  ) =
+  < node(N')-pipe : pipe | 
+    pipeMsg: ((log-commit L from node(N) to node(N')) :: ML) > .
+
+  --- 2.1 consume log-append, check prev logs
+  rl [log-append-reply] :
+  < node(N')-pipe : pipe | 
+    pipeMsg: (ML :: (log-append([TERM ~ LI] :: L) from node(N) to node(N'))) >
+  < node(N') : follower | curIndex: LI', curTerm: TERM',
+    log: L', AS >
+    <normal>
+  =>
+    <normal>
+  < node(N')-pipe : pipe | pipeMsg: ML >
+  < node(N') : follower | curIndex: LI, curTerm: TERM',
+    log: ([TERM ~ LI] :: L), AS >
+  log-ack[TERM ~ LI] from node(N') to node(N) .
+
+  --- 2.2 leader recv log ack not commit
+  crl [recv-log-ack] :
+  (log-ack[TERM ~ LI] from node(N') to node(N))
+  < node(N) : leader | allOther: OL, 
+    maxCommittedLogIndex: LI',
+    log: (L :: [TERM ~ LI ~ N2] :: L'), AS >
+    <normal>
+  =>
+    <normal>
+  < node(N) : leader | allOther: OL,
+    maxCommittedLogIndex: LI',
+    log: (L :: [TERM ~ LI ~ (N2 + 1)] :: L'), AS > 
+  if LI' < LI and (N2 + 1) < len(OL) quo 2 .
+
+  --- 2.3 leader recv log ack and commit
+  crl [commit-log-leader] :
+  (log-ack[TERM ~ LI] from node(N') to node(N))
+  < node(N) : leader | allOther: OL, 
+    maxCommittedLogIndex: LI',
+    log: (L :: [TERM ~ LI ~ N2] :: L'), AS >
+  < checker : checker | comInd: NS, AS' >
+    <normal>
+  =>
+    <normal>
+  < node(N) : follower | allOther: OL,
+    maxCommittedLogIndex: LI,
+    log: (L :: [TERM ~ LI ~ (N2 + 1)] :: L'), AS > 
+  < checker : checker | comInd: (LI, NS), AS' >
+  (multicast log-commit[TERM ~ LI] from node(N) to OL)
+  (elect-trigger from node(N + 1) to node(N + 1) )
+  if LI' < LI and (N2 + 1) >= len(OL) quo 2 .
+
+  --- 2.4 leader recv log ack after commit
+  ceq
+  (log-ack[TERM ~ LI] from node(N') to node(N))
+  < node(N) : leader | allOther: OL, 
+    maxCommittedLogIndex: LI',
+    log: (L :: [TERM ~ LI ~ N2] :: L'), AS >
+  =
+  < node(N) : leader | allOther: OL,
+    maxCommittedLogIndex: LI',
+    log: (L :: [TERM ~ LI ~ (N2 + 1)] :: L'), AS > 
+  if LI' >= LI .
+  eq
+  (log-ack[TERM ~ LI] from node(N') to node(N))
+  < node(N) : follower | AS >
+  =
+  < node(N) : follower | AS > .
+  --- crl [recycle-log-ack] :
+  --- (log-ack[TERM ~ LI] from node(N') to node(N))
+  --- < node(N) : leader | allOther: OL, 
+  ---   maxCommittedLogIndex: LI',
+  ---   log: (L :: [TERM ~ LI ~ N2] :: L'), AS >
+  --- =>
+  --- < node(N) : leader | allOther: OL,
+  ---   maxCommittedLogIndex: LI',
+  ---   log: (L :: [TERM ~ LI ~ (N2 + 1)] :: L'), AS > 
+  --- if LI' >= LI .
+
+  --- 2.5 follower commit log
+  rl [commit-log-follower] :
+  < node(N')-pipe : pipe | 
+    pipeMsg: (ML :: (log-commit[TERM ~ LI'] from node(N) to node(N'))) >
+  < node(N') : follower | maxCommittedLogIndex: LI,
+    log: L, AS >
+    <normal>
+  =>
+    <normal>
+  < node(N')-pipe : pipe | 
+    pipeMsg: ML >
+  < node(N') : follower | maxCommittedLogIndex: LI',
+    log: L, AS > .
+
+  --- 2.6 append new log block, non-deterministically
+  --- crl [append-new-log] :
+  --- < node(N) : leader | curTerm: TERM,
+  ---   allOther: OL,
+  ---   log: L,
+  ---   curIndex: LI, AS > 
+  --- =>
+  --- < node(N) : leader | curTerm: TERM,
+  ---   allOther: OL, 
+  ---   log: ([TERM ~ (LI + 1) ~ 0] :: L),
+  ---   curIndex: (LI + 1), AS > 
+  --- multicast log-append(log-3to2(([TERM ~ (LI + 1)] :: L))) from node(N) to OL
+  --- if LI <= 51 .
+
+  --- 3 cnt and disk
+  --- 3.1 cnt reply cnt plus
+  rl [cnt-reply] :
+  (update-cnt[TERM ~ N] from node(N') to node(N')-cnt)
+  < node(N')-cnt : cnt | cnt: N2 >
+    <normal>
+  =>
+    <normal>
+  < node(N')-cnt : cnt | cnt: (N2 + 1) >
+  (reply-cnt[TERM ~ N ~ (N2 + 1)] from node(N')-cnt to node(N')) .
+
+  --- 3.2 node recv cnt and write disk
+  rl [cnt-send-disk] :
+  (reply-cnt[TERM ~ N ~ N2] from node(N')-cnt to node(N'))
+  < node(N') : CID | AS >
+    <normal>
+  =>
+    <normal>
+  < node(N') : CID | AS >
+  (write-disk[TERM ~ N ~ N2] from node(N') to node(N')-disk) .
+
+  --- 3.3 disk written
+  rl [cnt-disk-written] :
+  (write-disk[TERM ~ N ~ N2] from node(N') to node(N')-disk)
+  < node(N')-disk : disk | disk: L >
+    <normal>
+  =>
+    <normal>
+  < node(N')-disk : disk | 
+    disk: ([TERM ~ N ~ N2] :: L) > 
+  (write-disk-ack[TERM ~ N] from node(N')-disk to node(N')) .
+
+  --- fault and recovery
+  op fault : -> Oid .
+  op Fault : -> Cid .
+  --- mark fault node, in reco process 
+  op f_ : Cid -> Cid .   
+  --- node occured fault(reboot)
+  op fnode:_ : OidList -> Attribute .
+  --- number limit of fault node
+  op flimit:_ : Nat -> Attribute .
+  --- the fault times
+  op ftime:_ : Nat -> Attribute .
+  op reco:_ : Logs -> Attribute .
+
+  --- 4.1 node reboot, clear node memory, f1
+  crl [node-reboot] :
+  < fault : Fault | fnode: OL, flimit: N, ftime: N5 >
+  < OID : CID |
+    curLeader: OID',
+    curTerm: N2, allOther: OL',
+    ballotHistory: L', log: L'',
+    curIndex: N3, maxCommittedLogIndex: N4,
+    reco: L''' > 
+  < OID' : CID' | AS >
+    <normal>
+  =>
+    <recof>
+  < fault : Fault | fnode: (OID :: OL), flimit: N, ftime: (N5 + 1) >
+  < OID : f CID | 
+    curLeader: node(9999),
+    curTerm: 0, allOther: OL',
+    ballotHistory: empty, log: empty,
+    curIndex: 0, maxCommittedLogIndex: 0,
+    reco: empty > 
+  < OID' : CID' | AS >
+  if not OID in OL 
+    --- and len(OL) < N 
+    and N5 < 2
+    and (CID == leader or 
+          (CID == follower and CID' == leader)) .
+
+  --- 4.2 recover ballot history(meta data), check cnt, f2
+  --- 4.2.1 disk rollback 1, non-deter
+  rl [reco-disk-rollback-1] :
+  < node(N) : f CID | curLeader: node(9999),
+    ballotHistory: empty, AS > 
+  < node(N)-disk : disk | disk: (LOG :: L) >
+  <recof>
+  =>
+  <recof>
+  < node(N) : f CID | curLeader: node(8888),
+    ballotHistory: empty, AS > 
+  < node(N)-disk : disk | disk: L > .
+
+  rl [reco-disk-rollback-1-no] :
+  < node(N) : f CID | curLeader: node(9999),
+    ballotHistory: empty, AS > 
+  < node(N)-disk : disk | disk: (LOG :: L) >
+    <recof>
+  =>
+    <recof>
+  < node(N) : f CID | curLeader: node(8888),
+    ballotHistory: empty, AS > 
+  < node(N)-disk : disk | disk: (LOG :: L) > .
+
+  --- 4.2.2 check cnt, matched
+  crl [recover-ballot-his-match] :
+  < node(N) : f CID | curLeader: node(8888),
+    ballotHistory: empty, curTerm: TERM', AS > 
+  < node(N)-disk : disk | disk: ([TERM ~ N2 ~ N3] :: L) >
+  < node(N)-cnt : cnt | cnt: N' >
+    <recof>
+  =>
+    <recof>
+  < node(N) : f f CID | curLeader: node(7777),
+    ballotHistory: log-3to2([TERM ~ N2 ~ N3] :: L), 
+    curTerm: TERM, AS >
+  < node(N)-disk : disk | disk: L >
+  < node(N)-cnt : cnt | cnt: N' >
+  if N3 == N' .
+
+  --- 4.2.3 check cnt, not matched, query term
+  op reco-query-term : -> MsgCont .
+  crl [recover-ballot-his-not-match] :
+  < node(N) : f CID | curLeader: node(8888),
+    allOther: OL, reco: L', AS > 
+  < node(N)-disk : disk | disk: ([TERM ~ N2 ~ N3] :: L) >
+  < node(N)-cnt : cnt | cnt: N' >
+    <recof>
+  =>
+    <recof>
+  < node(N) : f CID | curLeader: node(7777),
+    allOther: OL, reco: empty, AS >
+  < node(N)-disk : disk | disk: ([TERM ~ N2 ~ N3] :: L) > 
+  < node(N)-cnt : cnt | cnt: N' > 
+  (multicast reco-query-term from node(N) to OL)
+  if N3 =/= N' .
+
+  --- 4.2.4 others reply query term
+  op reco-query-term-reply : Nat -> MsgCont .
+  rl [reco-term-reply] :
+  (reco-query-term from node(N) to node(N'))
+  < node(N') : CID | curTerm: TERM, AS >
+    <recof>
+  =>
+    <recof>
+  < node(N') : CID | curTerm: TERM, AS >
+  (reco-query-term-reply(TERM) from node(N') to node(N)) .
+
+  --- 4.2.5 recv query term reply
+  crl [reco-recv-term-reply] :
+  (reco-query-term-reply(TERM) from node(N') to node(N))
+  < node(N) : f CID | curTerm: TERM', allOther: OL,
+    reco: L, AS >
+    <recof>
+  =>
+    <recof>
+  < node(N) : f CID | curTerm: max(TERM + 2,TERM'), allOther: OL,
+    reco: ([N' ~ TERM] :: L), AS >
+  if len(L) + 1 < len(OL) quo 2 .
+
+  --- 4.2.6 enough recv query term reply, f2
+  crl [reco-recv-term-reply] :
+  (reco-query-term-reply(TERM) from node(N') to node(N))
+  < node(N) : f CID | curTerm: TERM', allOther: OL,
+    reco: L, AS >
+    <recof>
+  =>
+    <recof>
+  < node(N) : f f CID | curTerm: max(TERM + 2,TERM'), allOther: OL,
+    reco: ([N' ~ TERM] :: L), AS >
+  if len(L) + 1 >= len(OL) quo 2 .
+  --- recycle
+  eq  
+  ((reco-query-term-reply(TERM) from node(N') to node(N))
+  < node(N) : f f CID |  AS > )
+  = < node(N) : f f CID |  AS > .
+
+  --- 4.3 reco leader
+  --- 4.3.1 reco, leader recover, request log, f3
+  op reco-req-log-ind : -> MsgCont . 
+  crl [reco-leader-log] :
+  < node(N) : f f leader |
+    ballotHistory: L, allOther: OL, 
+    reco: L', AS >
+    <recof>
+  =>
+    <recof>
+  < node(N) : f f f leader |
+    ballotHistory: L, allOther: OL, 
+    reco: empty, AS >
+  multicast reco-req-log-ind from node(N) to OL
+  if L =/= empty .
+
+  --- 4.3.2 reco, follower reply leader log idx
+  op reco-log-ind_ : Nat -> MsgCont .
+  rl [reco-reply-leader-log-idx] :
+  (reco-req-log-ind from node(N) to node(N'))
+  < node(N') : follower | curIndex: N2, 
+    maxCommittedLogIndex: N3, AS >
+    <recof>
+  =>
+    <recof>
+  < node(N') : follower | curIndex: N2, 
+    maxCommittedLogIndex: N3, AS >
+  reco-log-ind(N2) from node(N') to node(N) .
+
+  --- 4.3.3 reco, leader recv ind, 6s
+  crl [reco-recv-log-ind] :
+  (reco-log-ind(N2) from node(N') to node(N))
+  < node(N) : f f f leader | 
+    reco: L, allOther: OL, AS >
+    <recof>
+  =>
+    <recof>
+  < node(N) : f f f leader | 
+    reco: ([N2 ~ N'] :: L), allOther: OL, AS > 
+  if len(L) + 1 < len(OL) quo 2 .
+
+  --- 4.3.4 reco, leader request log, f4
+  op reco-req-log : -> MsgCont .
+  op nodeNwithMaxInd : Logs -> Nat .  --- [IND~NODEN]
+  op $nodeNwithMaxInd : Logs Nat Nat -> Nat .   
+  --- L, maxInd, nodeN
+  eq nodeNwithMaxInd(L) = $nodeNwithMaxInd(L,0,0) .
+  ceq $nodeNwithMaxInd(([N ~ N'] :: L),N2,N3) 
+    = $nodeNwithMaxInd(L,N,N') if N > N2 .
+  ceq $nodeNwithMaxInd(([N ~ N'] :: L),N2,N3) 
+    = $nodeNwithMaxInd(L,N2,N3) if N <= N2 .
+  eq $nodeNwithMaxInd(empty,N2,N3) = N3 .
+  crl [reco-recv-log-ind-2] :
+  (reco-log-ind(N2) from node(N') to node(N))
+  < node(N) : f f f leader | curLeader: node(9999),
+    reco: L, allOther: OL, AS >
+    <recof>
+  =>
+    <recof>
+  < node(N) : f f f f leader | curLeader: node(N),
+    reco: ([N2 ~ N'] :: L), allOther: OL, AS > 
+  reco-req-log from node(N) to node(nodeNwithMaxInd(([N2 ~ N'] :: L))) 
+  if len(L) + 1 >= len(OL) quo 2 .
+
+  --- 4.3.5 reco, follower reply leader log
+  op reco-log_ : Logs -> MsgCont .
+  rl [reco-reply-log] :
+  (reco-req-log from node(N) to node(N')) 
+  < node(N') : follower | log: L, AS >
+    <recof>
+  =>
+    <recof>
+  < node(N') : follower | log: L, AS >
+  (reco-log(L) from node(N') to node(N)) .
+
+  --- 4.3.6 reco, leader recv log, f5, 24s
+  op maxPara2Log : Logs -> Nat .
+  op $maxPara2Log : Logs Nat -> Nat .
+  eq maxPara2Log(L) = $maxPara2Log(L,0) .
+  ceq $maxPara2Log(([N1 ~ N2] :: L),N3) = 
+      $maxPara2Log(L,N3)
+      if N2 <= N3 .
+  ceq $maxPara2Log(([N1 ~ N2] :: L),N3) = 
+      $maxPara2Log(L,N2)
+      if N2 > N3 .
+  eq $maxPara2Log(empty,N3) = N3 .
+  op maxPara1Log : Logs -> Nat .
+  op $maxPara1Log : Logs Nat -> Nat .
+  eq maxPara1Log(L) = $maxPara1Log(L,0) .
+  ceq $maxPara1Log(([N1 ~ N2] :: L),N3) = 
+      $maxPara1Log(L,N3)
+      if N1 <= N3 .
+  ceq $maxPara1Log(([N1 ~ N2] :: L),N3) = 
+      $maxPara1Log(L,N1)
+      if N1 > N3 .
+  eq $maxPara1Log(empty,N3) = N3 .
+  rl [reco-recv-log] :
+  (reco-log(L) from node(N') to node(N))
+  < node(N) : f f f f leader | log: L', 
+    curIndex: N3, AS >
+    <recof>
+  =>
+    <recof>
+  < node(N) : f f f f f leader | log: L, 
+    curIndex: maxPara2Log(L), AS > .
+
+  --- 4.3.7 reco, f5 leader to healthy, 319s
+  eq
+  (MC from node(N') to node(N))
+  < node(N) : f f f f f leader | AS >
+  =
+  < node(N) : f f f f f leader | AS > .
+  rl [reco-f5-leader-to-healthy] :
+  < node(N) : f f f f f leader | AS >
+    <recof>
+  =>
+    <normal>
+  < node(N) : leader | AS > .
+
+  --- 4.4 reco follower
+  --- 4.4.1 reco, follower ask leader, f3
+  op whoLeader : -> MsgCont .
+  rl [reco-who-leader] :
+  < node(N) : f f follower | allOther: OL, 
+    reco: L', AS >
+    <recof>
+  =>
+    <recof>
+  < node(N) : f f f follower | allOther: OL, 
+    reco: empty, AS >
+  multicast whoLeader from node(N) to OL .
+
+  --- 4.4.2 follower reply wholeader
+  op whoLeaderReply_ : Log -> MsgCont .
+  rl [reco-follower-reply-wholeader] :
+  (whoLeader from node(N) to node(N'))
+  < node(N') : follower | curTerm: TERM, AS >
+    <recof>
+  =>
+    <recof>
+  < node(N') : follower | curTerm: TERM, AS >
+  whoLeaderReply[TERM ~ 0] from node(N') to node(N) .
+
+  --- 4.4.3 leader reply wholeader
+  rl [reco-leader-reply-wholeader] :
+  (whoLeader from node(N) to node(N'))
+  < node(N') : leader | curTerm: TERM, AS >
+    <recof>
+  =>
+    <recof>
+  < node(N') : leader | curTerm: TERM, AS >
+  whoLeaderReply[TERM ~ N'] from node(N') to node(N) .
+
+  --- 4.4.4 fault follower recv wholeader reply
+  op leaderNinLog : Logs -> Nat .
+  ceq leaderNinLog([TERM ~ N] :: L) 
+    = N if N =/= 0 .
+  ceq leaderNinLog([TERM ~ N] :: L) 
+    = leaderNinLog(L) if N == 0 .
+  eq leaderNinLog(empty) = 0 . 
+  crl [reco-follower-recv-wholeader-reply] :
+  (whoLeaderReply[TERM ~ N2] from node(N') to node(N))
+  < node(N) : f f f follower | allOther: OL, 
+    reco: L, AS >
+    <recof>
+  =>
+    <recof>
+  < node(N) : f f f follower | allOther: OL, 
+    reco: ([TERM ~ N2] :: L), AS >
+  if (len(L) + 1 < len(OL) quo 2)
+    or leaderNinLog([TERM ~ N2] :: L) == 0 .
+
+  --- 4.4.5 follow request log to leader, f4
+  crl [recp-follower-req-log] :
+  (whoLeaderReply[TERM ~ N2] from node(N') to node(N))
+  < node(N) : f f f follower | allOther: OL, 
+    reco: L, curLeader: OID, AS >
+    <recof>
+  =>
+    <recof>
+  < node(N) : f f f f follower | allOther: OL, 
+    reco: ([TERM ~ N2] :: L), 
+    curLeader: node(maxPara2Log([TERM ~ N2] :: L)), AS >
+  reco-req-log from node(N) to node(leaderNinLog([TERM ~ N2] :: L))
+  if len(L) + 1 >= len(OL) quo 2 
+    and leaderNinLog([TERM ~ N2] :: L) =/= 0 .
+  --- recycle
+  eq ((whoLeaderReply[TERM ~ N2] from node(N') to node(N))
+  < node(N) : f f f f follower | AS > )
+  = < node(N) : f f f f follower | AS > .
+  
+  --- 4.4.6 reco, leader reply follower log
+  op reco-log_ : Logs -> MsgCont .
+  rl [reco-reply-log-leader] :
+  (reco-req-log from node(N) to node(N')) 
+  < node(N') : leader | log: L, AS >
+    <recof>
+  =>
+    <recof>
+  < node(N') : leader | log: L, AS >
+  (reco-log(log-3to2(L)) from node(N') to node(N)) .
+
+  --- 4.4.7 reco, leader recv log, f5
+  rl [reco-follower-recv-log] :
+  (reco-log(L) from node(N') to node(N))
+  < node(N) : f f f f follower | log: L', 
+    curIndex: N3, AS >
+    <recof>
+  =>
+    <recof>
+  < node(N) : f f f f f follower | log: L, 
+    curIndex: maxPara2Log(L), AS > .
+
+  --- 4.4.8 reco, f5 follower to healthy follower, clear pipe
+  rl [reco-f5-follower-healthy] :
+  < node(N) : f f f f f follower | AS >
+  --- < node(N)-pipe : pipe | pipeMsg: ML >
+    <recof>
+  =>
+    <normal>
+  < node(N) : follower | AS > .
+  --- < node(N)-pipe : pipe | pipeMsg: nil > .
+
+
+  op init3 : -> Config .
+  eq init3 = 
+    < node(1) : follower | curLeader: node(0),
+      curTerm: 10, allOther: (node(2) :: node(3)),
+      ballotHistory: [10 ~ 0], log: [10 ~ 50],
+      curIndex: 50, maxCommittedLogIndex: 50,
+      reco: empty > 
+    < node(2) : follower | curLeader: node(0),
+      curTerm: 10, allOther: (node(1) :: node(3)),
+      ballotHistory: [10 ~ 0], log: [10 ~ 50],
+      curIndex: 50, maxCommittedLogIndex: 50,
+      reco: empty > 
+    < node(3) : follower | curLeader: node(0),
+      curTerm: 10, allOther: (node(1) :: node(2)),
+      ballotHistory: [10 ~ 0], log: [10 ~ 50],
+      curIndex: 50, maxCommittedLogIndex: 50,
+      reco: empty > 
+    < node(1)-pipe : pipe | pipeMsg: nil >
+    < node(2)-pipe : pipe | pipeMsg: nil >
+    < node(3)-pipe : pipe | pipeMsg: nil >
+    < node(1)-cnt : cnt | cnt: 100 >
+    < node(2)-cnt : cnt | cnt: 200 >
+    < node(3)-cnt : cnt | cnt: 300 >
+    < node(1)-disk : disk | disk: ([10 ~ 0 ~ 100] :: [9 ~ 0 ~ 99]) >
+    < node(2)-disk : disk | disk: ([10 ~ 0 ~ 200] :: [9 ~ 0 ~ 199]) >
+    < node(3)-disk : disk | disk: ([10 ~ 0 ~ 300] :: [9 ~ 0 ~ 299]) >
+    < fault : Fault | fnode: nil, flimit: 1, ftime: 0 >
+    < checker : checker | comInd: empty, majN: 2 >
+    (elect-trigger from node(1) to node(1) )
+    <normal> .
+
+  op init5 : -> Config .
+  eq init5 = 
+    < node(1) : follower | curLeader: node(0),
+      curTerm: 10, allOther: (node(2) :: node(3) :: node(4) :: node(5)),
+      ballotHistory: [10 ~ 0], log: [10 ~ 50],
+      curIndex: 50, maxCommittedLogIndex: 50, reco: empty > 
+    < node(2) : follower | curLeader: node(0),
+      curTerm: 10, allOther: (node(1) :: node(3) :: node(4) :: node(5)),
+      ballotHistory: [10 ~ 0], log: [10 ~ 50],
+      curIndex: 50, maxCommittedLogIndex: 50, reco: empty > 
+    < node(3) : follower | curLeader: node(0),
+      curTerm: 10, allOther: (node(1) :: node(2) :: node(4) :: node(5)),
+      ballotHistory: [10 ~ 0], log: [10 ~ 50],
+      curIndex: 50, maxCommittedLogIndex: 50, reco: empty > 
+    < node(4) : follower | curLeader: node(0),
+      curTerm: 10, allOther: (node(1) :: node(2) :: node(3) :: node(5)),
+      ballotHistory: [10 ~ 0], log: [10 ~ 50],
+      curIndex: 50, maxCommittedLogIndex: 50, reco: empty > 
+    < node(5) : follower | curLeader: node(0),
+      curTerm: 10, allOther: (node(1) :: node(2) :: node(3) :: node(4)),
+      ballotHistory: [10 ~ 0], log: [10 ~ 50],
+      curIndex: 50, maxCommittedLogIndex: 50, reco: empty > 
+    < node(1)-pipe : pipe | pipeMsg: nil >
+    < node(2)-pipe : pipe | pipeMsg: nil >
+    < node(3)-pipe : pipe | pipeMsg: nil >
+    < node(4)-pipe : pipe | pipeMsg: nil >
+    < node(5)-pipe : pipe | pipeMsg: nil >
+    < node(1)-cnt : cnt | cnt: 100 >
+    < node(2)-cnt : cnt | cnt: 200 >
+    < node(3)-cnt : cnt | cnt: 300 >
+    < node(4)-cnt : cnt | cnt: 400 >
+    < node(5)-cnt : cnt | cnt: 500 >
+    < node(1)-disk : disk | disk: ([10 ~ 0 ~ 100] :: [9 ~ 0 ~ 99]) >
+    < node(2)-disk : disk | disk: ([10 ~ 0 ~ 200] :: [9 ~ 0 ~ 199]) >
+    < node(3)-disk : disk | disk: ([10 ~ 0 ~ 300] :: [9 ~ 0 ~ 299]) >
+    < node(4)-disk : disk | disk: ([10 ~ 0 ~ 400] :: [9 ~ 0 ~ 399]) >
+    < node(5)-disk : disk | disk: ([10 ~ 0 ~ 500] :: [9 ~ 0 ~ 499]) >
+    < fault : Fault | fnode: nil, flimit: 2, ftime: 0 >
+    < checker : checker | comInd: empty, majN: 3 >
+    (elect-trigger from node(1) to node(1) )
+    <normal> .
+    
+endm
+
+load model-checker
+
+mod CHIMERA-CHECK is 
+  inc CHIMERA .
+  inc MODEL-CHECKER .
+
+  subsort Config < State .
+
+
+
+  vars N N' N1 N2 N3 N4 TERM TERM' : Nat .
+  var CID : Cid . vars OID OID' : Oid .
+  vars AS AS' : AttributeSet . vars OL OL' : OidList .
+  vars C C' : Config . vars L L' L'' : Logs .
+  var NS : NatSet .
+
+  --- double vote
+  op doubleVote : -> Prop .
+  op isHistoryDoubleVote : Logs -> Bool .
+  ceq isHistoryDoubleVote(L :: [TERM ~ N1] :: L' :: [TERM ~ N2] :: L'')
+  = true if N1 =/= N2 .
+  eq isHistoryDoubleVote(L) = false [owise] .
+
+  eq ((< node(N) : CID | ballotHistory: L, AS > C) |= doubleVote)
+  = isHistoryDoubleVote(L) or (C |= doubleVote) .
+  
+  eq (C |= doubleVote) = false [owise] .
+
+  --- double leader
+  op doubleLeader : -> Prop .
+  eq ((< node(N) : leader | curTerm: TERM, AS > 
+       < node(N') : leader | curTerm: TERM, AS' > C) 
+    |= doubleLeader)
+  = true .
+  eq ( C |= doubleLeader)
+  = false [owise] .
+
+  --- committed marjority
+  ops comProp marProp : Nat -> Prop .
+  op isMarCom : Config Nat Nat -> Bool . --- config, target ind, majN
+  op $isMarCom : Config Nat Nat Nat -> Bool .
+  eq isMarCom(C,N,N') = $isMarCom(C,N,N',0) .
+  ceq $isMarCom((< node(N3) : CID | maxCommittedLogIndex: N4, AS > C),
+    N,N',N2) = $isMarCom(C,N,N',N2 + 1) if N4 >= N .
+  ceq $isMarCom((< node(N3) : CID | maxCommittedLogIndex: N4, AS > C),
+    N,N',N2) = $isMarCom(C,N,N',N2) if N4 < N .
+  eq $isMarCom(C,N,N',N2) = N2 >= N' [owise] .
+
+  eq ((< checker : checker | comInd: NS, AS > C) |= comProp(N))
+  = N in NS .
+  eq ((< checker : checker | majN: N', AS > C) |= marProp(N))
+  = isMarCom(C,N,N') .
+
+  --- liveness, eventually recovery
+  ops normalProp recofProp : -> Prop .
+  eq ((<normal> C) |= normalProp) = true .
+  eq (C |= normalProp) = false [owise] .
+  eq ((<recof> C) |= recofProp) = true .
+  eq (C |= recofProp) = false [owise] .
+
+
+endm
+
+set clear rules off .

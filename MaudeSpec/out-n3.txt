@@ -1,0 +1,24 @@
+		     \||||||||||||||||||/
+		   --- Welcome to Maude ---
+		     /||||||||||||||||||\
+	    Maude 3.3.1 built: Apr 13 2023 16:10:31
+	     Copyright 1997-2023 SRI International
+		   Thu Sep 18 12:34:56 2025
+==========================================
+reduce in CHIMERA-CHECK : modelCheck(init3, []~ doubleLeader) .
+rewrites: 55459778 in 557512ms cpu (557515ms real) (99477 rewrites/second)
+result Bool: true
+==========================================
+reduce in CHIMERA-CHECK : modelCheck(init3, [](comProp(51) -> []<> marProp(
+    51))) .
+rewrites: 73060988 in 1293854ms cpu (1293858ms real) (56467 rewrites/second)
+result Bool: true
+==========================================
+reduce in CHIMERA-CHECK : modelCheck(init3, [](recofProp -> []<> normalProp)) .
+rewrites: 56675668 in 1144575ms cpu (1144577ms real) (49516 rewrites/second)
+result Bool: true
+==========================================
+reduce in CHIMERA-CHECK : modelCheck(init3, []<> comProp(51)) .
+rewrites: 56684571 in 1145987ms cpu (1145990ms real) (49463 rewrites/second)
+result Bool: true
+Bye.
